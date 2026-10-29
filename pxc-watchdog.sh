@@ -72,14 +72,17 @@ recent_restarts() {
 }
 
 main() {
-    local state before after donor count
+    local state before after donor count rc
 
     if [[ ! -r $MYSQL_DEFAULTS_FILE ]]; then
         log err "cannot read credentials file $MYSQL_DEFAULTS_FILE"
         return 1
     fi
 
-    exec 9>"$LOCK_FILE"
+    if ! exec 9>"$LOCK_FILE"; then
+        log err "cannot open lock file $LOCK_FILE"
+        return 1
+    fi
     if ! flock -n 9; then
         log info "another run is still active; skipping"
         return 0
@@ -94,7 +97,10 @@ main() {
         return 0
     fi
 
-    before=$(transfer_sample)
+    if ! before=$(transfer_sample); then
+        log err "ss failed; cannot check transfer progress"
+        return 1
+    fi
     log notice "state is '$state'; checking transfer progress for ${WAIT_SECONDS}s"
     sleep "$WAIT_SECONDS"
 
@@ -106,7 +112,10 @@ main() {
         log notice "state changed to '$state'; nothing to do"
         return 0
     fi
-    after=$(transfer_sample)
+    if ! after=$(transfer_sample); then
+        log err "ss failed; cannot check transfer progress"
+        return 1
+    fi
 
     # bytes_received on a connection only grows, so a different sample means
     # data arrived or a new connection opened. An open connection whose count
@@ -145,10 +154,16 @@ main() {
     fi
 
     log warning "restarting $SERVICE_NAME ($donor is reachable; restart $(( count + 1 )) of $MAX_RESTARTS in 24h)"
-    if ! timeout "$STOP_TIMEOUT" systemctl stop "$SERVICE_NAME"; then
+    timeout "$STOP_TIMEOUT" systemctl stop "$SERVICE_NAME"
+    rc=$?
+    if (( rc != 0 )); then
         # timeout only kills the systemctl client: kill mysqld, then wait for
         # the stop job to finish.
-        log err "stop did not finish in ${STOP_TIMEOUT}s; sending SIGKILL"
+        if (( rc == 124 )); then
+            log err "stop did not finish in ${STOP_TIMEOUT}s; sending SIGKILL"
+        else
+            log err "systemctl stop $SERVICE_NAME failed (exit $rc); sending SIGKILL"
+        fi
         systemctl kill -s SIGKILL "$SERVICE_NAME"
         if ! timeout 60 systemctl stop "$SERVICE_NAME"; then
             log crit "$SERVICE_NAME did not stop; not starting it. Manual intervention required."

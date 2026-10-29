@@ -11,7 +11,7 @@ flowchart TD
     start(["pxc-watchdog.timer fires<br/>pxc-watchdog.service runs the script"])
 
     cred{"MYSQL_DEFAULTS_FILE<br/>readable?"}
-    lock{"flock -n on LOCK_FILE<br/>acquired?"}
+    lock{"open LOCK_FILE and<br/>flock -n acquired?"}
 
     q1{"mysql: read<br/>wsrep_local_state_comment<br/>succeeds?"}
     j1{"state starts with<br/>Joining?"}
@@ -32,12 +32,14 @@ flowchart TD
     rec{"record restart in<br/>STATE_DIR/restarts<br/>succeeds?"}
 
     stop{"systemctl stop<br/>within STOP_TIMEOUT<br/>(300 s)?"}
-    kill["err: stop did not finish<br/>systemctl kill -s SIGKILL"]
+    kill["err: stop timed out or failed<br/>systemctl kill -s SIGKILL"]
     stop2{"systemctl stop<br/>within 60 s?"}
     startq{"systemctl start --no-block<br/>SERVICE_NAME<br/>succeeds?"}
 
     e_cred(["exit 1 · err<br/>cannot read credentials file"])
     e_lock(["exit 0 · info<br/>another run is still active"])
+    e_lockerr(["exit 1 · err<br/>cannot open lock file"])
+    e_ss(["exit 1 · err<br/>ss failed; cannot check<br/>transfer progress"])
     e_query(["exit 0 · warning<br/>cannot query mysqld"])
     e_notj(["exit 0 · info<br/>state is '...'; nothing to do"])
     e_changed(["exit 0 · notice<br/>state changed during the wait"])
@@ -53,16 +55,21 @@ flowchart TD
     start --> cred
     cred -- no --> e_cred
     cred -- yes --> lock
-    lock -- no --> e_lock
+    lock -- "no: lock busy" --> e_lock
+    lock -- "no: cannot open file" --> e_lockerr
     lock -- yes --> q1
     q1 -- no --> e_query
     q1 -- yes --> j1
     j1 -- "no (Synced, Donor, ...)" --> e_notj
-    j1 -- yes --> s1 --> wait --> q2
+    j1 -- yes --> s1
+    s1 -- "ss fails" --> e_ss
+    s1 --> wait --> q2
     q2 -- no --> e_query
     q2 -- yes --> j2
     j2 -- no --> e_changed
-    j2 -- yes --> s2 --> prog
+    j2 -- yes --> s2
+    s2 -- "ss fails" --> e_ss
+    s2 --> prog
     prog -- "yes: bytes arrived or<br/>a new connection opened" --> e_prog
     prog -- no --> stuck --> reach
     reach -- no --> e_link
@@ -87,7 +94,7 @@ flowchart TD
     classDef warn fill:#fffde7,stroke:#f9a825,color:#5d4037
     class e_lock,e_query,e_notj,e_changed,e_prog,e_link,e_dry idle
     class e_ok restart
-    class e_cred,e_hist,e_nostop,e_nostart error
+    class e_cred,e_lockerr,e_ss,e_hist,e_nostop,e_nostart error
     class e_cap alert
     class stuck,kill warn
 ```
@@ -99,7 +106,7 @@ flowchart TD
 | Nothing to do | green | 0 | Healthy, transfer progressing, link down, DRY_RUN, or another run active |
 | Restart issued | blue | 0 | mysql was stopped and a start was queued; the rejoin continues without the script |
 | Restart cap reached | orange | 2 | Stuck with the link up, but 4 restarts already in 24 h; `pxc-watchdog.service` shows as failed |
-| Error | red | 1 | Missing credentials, unwritable history, or stop/start failed; needs a look |
+| Error | red | 1 | Credentials or lock file unusable, `ss` failed, unwritable history, or stop/start failed; needs a look |
 
 Points the chart makes explicit:
 
@@ -107,6 +114,8 @@ Points the chart makes explicit:
   `SHOW GLOBAL STATUS LIKE 'wsrep_local_state_comment'`, run with
   `mysql --defaults-extra-file`. If mysqld cannot be queried (for example during
   an SST, when it refuses client connections), the run ends without action.
+  If `ss` fails, the run exits 1: a broken `ss` is never read as "no
+  connection".
 - **A connection alone is not progress.** The two `ss` samples must differ.
   `bytes_received` on a socket only grows, so identical samples mean nothing
   arrived, even if the socket is ESTAB with a large Recv-Q.
@@ -118,8 +127,8 @@ Points the chart makes explicit:
   have been possible.
 - **The restart is recorded before the stop**, so a crash halfway still counts
   against the cap. Writing the history also drops entries older than 24 h. DRY_RUN stops before this step and writes nothing.
-- **`timeout` only kills the `systemctl` client**, so a hung stop is followed
-  by `systemctl kill -s SIGKILL` and a second, bounded `systemctl stop` that
+- **`timeout` only kills the `systemctl` client**, so a stop that hangs or
+  fails is followed by `systemctl kill -s SIGKILL` and a second, bounded `systemctl stop` that
   waits for the stop job to finish.
 - **`start --no-block`** returns as soon as the start is queued, so a long
   IST/SST does not hold the timer job open.

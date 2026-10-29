@@ -236,6 +236,24 @@ case_stop_hangs() {
     expect_log "stop did not finish in 1s; sending SIGKILL"
 }
 
+case_stop_fails() {
+    states "$JOINING"
+    run_watchdog MOCK_STOP_FAIL=1
+    expect_rc 1
+    expect_log "^err systemctl stop mysql failed \\(exit 5\\); sending SIGKILL"
+    expect_log "^crit mysql did not stop; not starting it"
+    ! grep -q '^start' "$MOCK_DIR/systemctl.calls" || fail "start must not run after a failed stop"
+    ! grep -q 'did not finish' "$MOCK_DIR/log" || fail "a failed stop was reported as a timeout"
+}
+
+case_ss_fails() {
+    states "$JOINING"
+    run_watchdog MOCK_SS_FAIL=1
+    expect_rc 1
+    expect_no_restart
+    expect_log "^err ss failed; cannot check transfer progress"
+}
+
 case_mysqld_down() {
     states DOWN
     run_watchdog
@@ -272,6 +290,15 @@ case_lock_held() {
     expect_no_restart
     expect_calls mysql 0
     expect_log "another run is still active"
+}
+
+case_lock_dir_missing() {
+    states "$JOINING"
+    run_watchdog LOCK_FILE="$MOCK_DIR/no-such-dir/lock"
+    expect_rc 1
+    expect_no_restart
+    expect_calls mysql 0
+    expect_log "^err cannot open lock file"
 }
 
 case_missing_credentials() {
@@ -313,10 +340,13 @@ run_case case_cap_reached_site1_unreachable "cap reached but site 1 unreachable 
 run_case case_old_restarts_ignored          "restarts older than 24h do not count"
 run_case case_dry_run                       "DRY_RUN=1 -> logs, no restart, no history"
 run_case case_stop_hangs                    "stop hangs -> SIGKILL, then start"
+run_case case_stop_fails                    "stop fails at once -> reported as failure, not started"
+run_case case_ss_fails                      "ss fails -> exit 1, no restart"
 run_case case_mysqld_down                   "mysqld not queryable -> no restart"
 run_case case_new_connection                "connection replaced by new one -> no restart"
 run_case case_custom_service_name           "SERVICE_NAME=mysqld is honoured"
 run_case case_lock_held                     "lock held by another run -> skip"
+run_case case_lock_dir_missing              "lock file cannot be opened -> exit 1"
 run_case case_missing_credentials           "missing credentials file -> exit 1"
 
 echo

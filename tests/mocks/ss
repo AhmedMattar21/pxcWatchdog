@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Fake ss. Call N prints $MOCK_DIR/ss.N (nothing if it does not exist).
+# If MOCK_SS_FAIL is set, it fails like a broken ss.
 : "${MOCK_DIR:?MOCK_DIR must be set}"
 n=$(( $(cat "$MOCK_DIR/ss.calls" 2>/dev/null || echo 0) + 1 ))
 echo "$n" >"$MOCK_DIR/ss.calls"
 echo "$*" >>"$MOCK_DIR/ss.args"
+if [[ -n ${MOCK_SS_FAIL:-} ]]; then
+    echo "ss: cannot open netlink socket" >&2
+    exit 1
+fi
 if [[ -f $MOCK_DIR/ss.$n ]]; then
     cat "$MOCK_DIR/ss.$n"
 fi

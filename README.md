@@ -18,6 +18,8 @@ Every 15 minutes (`pxc-watchdog.timer`):
    mysqld cannot be queried, or the state does not start with `Joining` → do nothing.
 2. Record `bytes_received` of each established socket on local ports 4444 (SST)
    and 4568 (IST) with `ss`, wait 3 minutes, re-check the state, record again.
+   If `ss` itself fails, log an error and exit 1 without acting (a failed `ss`
+   is never mistaken for "no connection").
    - The node left `Joining` during the wait → do nothing.
    - The two `ss` samples differ (a connection received bytes, or a new one
      opened) → transfer in progress, do nothing.
@@ -27,15 +29,17 @@ Every 15 minutes (`pxc-watchdog.timer`):
    - If no site 1 node accepts TCP on 4567 → the link is still down, do nothing.
    - If 4 restarts already happened in the last 24 h → log at `crit` and exit 2
      (the service shows as failed). Manual intervention is needed.
-   - Otherwise: record the restart, `systemctl stop mysql` (SIGKILL via
-     `systemctl kill` if the stop takes longer than 300 s), then
-     `systemctl start --no-block mysql`.
+   - Otherwise: record the restart, `systemctl stop mysql` (if the stop takes
+     longer than 300 s or fails, SIGKILL via `systemctl kill` and wait up to
+     60 s more for the stop; if mysql still has not stopped, exit 1 without
+     starting it), then `systemctl start --no-block mysql`.
 
 It never bootstraps, never sets `pc.bootstrap`, and never acts on a node that is
 non-Primary but not Joining. A node stuck as non-Primary is left alone on purpose.
 
 Exit codes: `0` nothing to do / transfer in progress / restart issued,
-`1` error (credentials file missing, failed restart), `2` restart cap reached.
+`1` error (credentials or lock file unusable, `ss` failed, restart history not
+writable, stop or start failed), `2` restart cap reached.
 
 ## Requirements
 
@@ -179,6 +183,8 @@ Typical messages:
 | warning | `no site 1 node … reachable on TCP 4567; link is down, not restarting` | no restart |
 | warning | `restarting mysql (… restart N of 4 in 24h)` | restart issued |
 | crit | `RESTART CAP REACHED …` | stuck, link up, but no restarts left |
+| err | `ss failed; cannot check transfer progress` | nothing done, exit 1 |
+| err / crit | `stop did not finish …` / `… did not stop; not starting it` | hung stop; see exit code |
 
 To get alerted on exit code 2, add an `OnFailure=` unit to
 `pxc-watchdog.service` or watch for `-p crit` messages from `pxc-watchdog`.
@@ -218,6 +224,7 @@ tests/run-tests.sh
 Covered cases: Synced; Joining with bytes increasing; ESTAB connection with no
 byte change; no connection; site 1 unreachable; restart cap reached (exit 2);
 cap reached while site 1 is unreachable (exit 0, no `crit`); Synced during the
-wait; restarts older than 24 h ignored; DRY_RUN; stop hangs → SIGKILL; mysqld
-not queryable; connection replaced by a new one; custom `SERVICE_NAME`; lock
-held; missing credentials.
+wait; restarts older than 24 h ignored; DRY_RUN; stop hangs → SIGKILL; stop
+fails at once (not started, reported as a failure); `ss` fails (exit 1, no
+restart); mysqld not queryable; connection replaced by a new one; custom
+`SERVICE_NAME`; lock held; lock file cannot be opened; missing credentials.
