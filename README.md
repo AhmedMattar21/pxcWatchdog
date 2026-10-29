@@ -10,36 +10,37 @@ restarts the node, with guardrails so it never makes things worse.
 
 ## What it does
 
+[FLOWCHART.md](FLOWCHART.md) shows every branch and exit code as a diagram.
+
 Every 15 minutes (`pxc-watchdog.timer`):
 
-1. If `mysql.service` is not `active` (stopped, or `activating` during a long
-   SST after a restart), or mysqld cannot be queried → do nothing.
-2. Read `wsrep_local_state_comment`. If it does not start with `Joining` → do nothing.
-3. Sample the bytes received on established sockets on local ports 4444 (SST)
-   and 4568 (IST), wait 3 minutes, re-check the state, sample again.
+1. Read `wsrep_local_state_comment` with `mysql` (`SHOW GLOBAL STATUS`). If
+   mysqld cannot be queried, or the state does not start with `Joining` → do nothing.
+2. Record `bytes_received` of each established socket on local ports 4444 (SST)
+   and 4568 (IST) with `ss`, wait 3 minutes, re-check the state, record again.
    - The node left `Joining` during the wait → do nothing.
-   - A transfer connection received more bytes → transfer in progress, do nothing.
-   - No bytes arrived, but the SST helper (`wsrep_sst_*` started by mysqld, and
-     its children) used ≥ 5 s of CPU → the SST is working locally (e.g.
-     `xtrabackup --prepare` after the network part finished), do nothing.
-   - Otherwise (no connection, or an open connection with no progress) → **stuck**.
-4. When stuck:
+   - The two `ss` samples differ (a connection received bytes, or a new one
+     opened) → transfer in progress, do nothing.
+   - Otherwise (no connection, or the same connection with the same byte count,
+     e.g. a full Recv-Q) → **stuck**.
+3. When stuck:
    - If no site 1 node accepts TCP on 4567 → the link is still down, do nothing.
    - If 4 restarts already happened in the last 24 h → log at `crit` and exit 2
      (the service shows as failed). Manual intervention is needed.
-   - Otherwise: `systemctl stop mysql` (SIGKILL via `systemctl kill` if the stop
-     takes longer than 300 s), then `systemctl start --no-block mysql`.
+   - Otherwise: record the restart, `systemctl stop mysql` (SIGKILL via
+     `systemctl kill` if the stop takes longer than 300 s), then
+     `systemctl start --no-block mysql`.
 
 It never bootstraps, never sets `pc.bootstrap`, and never acts on a node that is
 non-Primary but not Joining. A node stuck as non-Primary is left alone on purpose.
 
 Exit codes: `0` nothing to do / transfer in progress / restart issued,
-`1` error (configuration, failed restart), `2` restart cap reached.
+`1` error (credentials file missing, failed restart), `2` restart cap reached.
 
 ## Requirements
 
 bash ≥ 4.4, `mysql` client, `ss` (iproute2), systemd, `flock`, `logger`,
-`timeout`, `pgrep` (procps). All ship with RHEL 8+/Ubuntu 18.04+ PXC servers.
+`timeout`. All ship with RHEL 8+/Ubuntu 18.04+ PXC servers.
 
 ## Install (site 2 node only)
 
@@ -51,43 +52,41 @@ sudo systemctl daemon-reload
 
 ### Configure
 
-The settings are at the top of `/usr/local/sbin/pxc-watchdog.sh`. At minimum,
-set `DONOR_IPS` to the site 1 node addresses. You can edit the script, or
-override any setting in `/etc/default/pxc-watchdog`. The service loads that
-file if it exists, and it survives script upgrades:
+The settings are at the top of `/usr/local/sbin/pxc-watchdog.sh`. Rather than
+editing the script, override them in `/etc/default/pxc-watchdog`. The service
+loads that file if it exists, and it survives script upgrades.
+[`pxc-watchdog.default`](pxc-watchdog.default) is a commented example with
+every setting and its default. At minimum, set `DONOR_IPS` to the site 1 node
+addresses:
 
 ```bash
-sudo tee /etc/default/pxc-watchdog >/dev/null <<'EOF'
-DONOR_IPS="10.0.1.11 10.0.1.12"
-SERVICE_NAME=mysql
-EOF
+sudo install -m 0644 pxc-watchdog.default /etc/default/pxc-watchdog
+sudoedit /etc/default/pxc-watchdog
 ```
+
+The file is read by systemd, not by bash: plain `KEY=VALUE` lines, quotes
+around values with spaces, no `$VAR` expansion. Changes apply on the next timer
+run. A manual run does not read it; pass settings on the command line instead
+(see [Test with DRY_RUN=1](#test-with-dry_run1)).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `SERVICE_NAME` | `mysql` | systemd unit running mysqld |
 | `DONOR_IPS` | `10.0.1.11 10.0.1.12` | site 1 nodes (space separated) |
 | `GCOMM_PORT` | `4567` | port probed on site 1 nodes |
-| `TRANSFER_PORTS` | `4444 4568` | local SST/IST ports sampled with `ss` |
-| `WAIT_SECONDS` | `180` | time between the two samples |
-| `MAX_RESTARTS` / `RESTART_WINDOW_SECONDS` | `4` / `86400` | restart cap |
-| `STOP_TIMEOUT` / `KILL_WAIT_SECONDS` | `300` / `60` | stop timeout before SIGKILL, wait after it |
-| `SST_MIN_CPU_SECONDS` | `5` | CPU the SST helper must use in the window to count as "working" |
+| `WAIT_SECONDS` | `180` | time between the two `ss` samples |
+| `MAX_RESTARTS` | `4` | restarts allowed per rolling 24 h |
+| `STOP_TIMEOUT` | `300` | seconds `systemctl stop` may take before SIGKILL |
 | `MYSQL_DEFAULTS_FILE` | `/etc/pxc-watchdog/my.cnf` | client credentials |
 | `STATE_DIR` | `/var/lib/pxc-watchdog` | restart history (persists across reboots) |
 | `LOCK_FILE` | `/run/lock/pxc-watchdog.lock` | `flock` lock |
-| `WATCHDOG_UNIT` | `pxc-watchdog.service` | unit whose `TimeoutStartSec` the run-time check reads |
 | `DRY_RUN` | `0` | `1` = log only, change nothing |
 
-The script's worst-case run time must fit in `TimeoutStartSec` of
-`pxc-watchdog.service` (15 min). Otherwise systemd could kill it between
-`stop` and `start` and leave mysql down. The worst case is
-`2*MYSQL_TIMEOUT + WAIT_SECONDS + TCP_TIMEOUT * (number of DONOR_IPS) +
-STOP_TIMEOUT + 10 + KILL_WAIT_SECONDS + 30`, which is 630 s with the defaults.
-When run by the timer, the script checks this at startup. If the worst case
-does not fit, it logs an `err` and exits 1 without touching anything, so raise
-`TimeoutStartSec` (`systemctl edit pxc-watchdog.service`) when you raise the
-timeouts. Runs by hand are not limited.
+If you raise `WAIT_SECONDS` or `STOP_TIMEOUT`, also raise `TimeoutStartSec` in
+`pxc-watchdog.service` (15 min) with `systemctl edit pxc-watchdog.service`. It
+must stay above `WAIT_SECONDS + STOP_TIMEOUT` plus about 2 minutes (about
+10 minutes with the defaults). Otherwise systemd could kill the script between
+`stop` and `start` and leave mysql down.
 
 ### MySQL user (USAGE only)
 
@@ -116,7 +115,7 @@ sudo chmod 600 /etc/pxc-watchdog/my.cnf
 ```
 
 The password is passed with `--defaults-extra-file` and never appears on a
-command line. The script logs a warning if the file is readable by group or other.
+command line.
 
 Check it:
 
@@ -173,14 +172,13 @@ Typical messages:
 
 | Priority | Message | Meaning |
 | --- | --- | --- |
-| info | `wsrep_local_state_comment='Synced'; nothing to do` | healthy |
-| notice | `node is 'Joining…'; re-checking in 180s` | sampling started |
+| info | `state is 'Synced'; nothing to do` | healthy |
+| notice | `state is 'Joining…'; checking transfer progress for 180s` | sampling started |
 | notice | `state transfer in progress (…)` | bytes are flowing, left alone |
 | warning | `node stuck in 'Joining…': …` | stuck, checks before restart follow |
-| warning | `no site 1 node … reachable on TCP 4567` | link still down, no restart |
-| warning | `restarting mysql (restart N of 4 …)` | restart issued |
+| warning | `no site 1 node … reachable on TCP 4567; link is down, not restarting` | no restart |
+| warning | `restarting mysql (… restart N of 4 in 24h)` | restart issued |
 | crit | `RESTART CAP REACHED …` | stuck, link up, but no restarts left |
-| err | `config: worst-case run time is …` | timeouts do not fit `TimeoutStartSec`; nothing done |
 
 To get alerted on exit code 2, add an `OnFailure=` unit to
 `pxc-watchdog.service` or watch for `-p crit` messages from `pxc-watchdog`.
@@ -196,16 +194,19 @@ To reset the restart cap after fixing the problem by hand:
   restarts a day. Check inbound 4444/4568 from site 1 if you see repeated restarts.
 - **SIGKILL during IST** usually turns the next join into a full SST over the WAN.
   That is why `STOP_TIMEOUT` defaults to a generous 300 s.
-- An SST helper that is busy but not making progress (burning CPU in a loop)
-  counts as progress, and the watchdog will not restart it. Only `wsrep_sst_*`
-  processes started by the unit's mysqld are counted.
-- The run-time check needs systemd ≥ 232 (`INVOCATION_ID`). On older systemd
-  it is skipped, so keep `TimeoutStartSec` in step with the timeouts by hand.
+- **Progress is judged by network bytes only.** After an SST's data has arrived,
+  `xtrabackup --prepare` runs with no socket open. This is safe because mysqld
+  does not accept client connections during an SST, so the `mysql` query fails
+  and the watchdog does nothing. If a setup did answer queries in that phase,
+  a long prepare could be seen as stuck.
+- If one transfer connection closes while another stays stuck in the same
+  window, the samples differ and that run counts it as progress. The next run,
+  15 minutes later, catches it.
 
 ## Tests
 
 `tests/run-tests.sh` runs the real script against fake `mysql`, `ss`,
-`systemctl`, `logger` and `pgrep` binaries (`tests/mocks/`) placed first on
+`systemctl` and `logger` binaries (`tests/mocks/`) placed first on
 `PATH`, with `WAIT_SECONDS=1`. Site 1 reachability uses real TCP to a local
 `python3` listener (python3 is needed for the tests only). Nothing on the host
 is touched.
@@ -217,8 +218,6 @@ tests/run-tests.sh
 Covered cases: Synced; Joining with bytes increasing; ESTAB connection with no
 byte change; no connection; site 1 unreachable; restart cap reached (exit 2);
 cap reached while site 1 is unreachable (exit 0, no `crit`); Synced during the
-wait; cap window rolling over; DRY_RUN; stop hangs → SIGKILL; mysqld not
-queryable; unit activating; connection replaced by a new one; custom
-`SERVICE_NAME`; busy vs idle SST helper; busy `wsrep_sst_` process outside
-mysqld ignored; worst-case run time above / equal to `TimeoutStartSec`,
-`infinity`, `0`, and runs by hand; lock held; missing credentials.
+wait; restarts older than 24 h ignored; DRY_RUN; stop hangs → SIGKILL; mysqld
+not queryable; connection replaced by a new one; custom `SERVICE_NAME`; lock
+held; missing credentials.

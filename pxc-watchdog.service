@@ -2,18 +2,16 @@
 Description=PXC watchdog: restart a node stuck in Joining
 Wants=network-online.target
 After=network-online.target
-# No After=mysql.service on purpose: the script checks the unit state itself,
-# and an ordering dependency would make this job wait behind a long SST start.
+# No After=mysql.service on purpose: an ordering dependency would make this
+# job wait behind a long SST start.
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/pxc-watchdog.sh
 # Optional overrides for the settings at the top of the script.
 EnvironmentFile=-/etc/default/pxc-watchdog
-# Must cover the script's worst-case run time, or systemd could kill it between
-# "stop" and "start" and leave mysql down. The script checks this at startup
-# and refuses to run if it does not fit. Defaults: 2*20 + 180 + 2*5 + 300 + 10
-# + 60 + 30 = 630s.
+# Must be longer than the worst case, or systemd could kill the script between
+# "stop" and "start": WAIT_SECONDS + STOP_TIMEOUT + ~2 min (defaults ~10 min).
 TimeoutStartSec=15min
 # Creates /var/lib/pxc-watchdog for the restart history.
 StateDirectory=pxc-watchdog

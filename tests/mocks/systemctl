@@ -1,27 +1,15 @@
 #!/usr/bin/env bash
-# Fake systemctl. Records every call in $MOCK_DIR/systemctl.calls and keeps
-# the unit state in $MOCK_DIR/unit-state (default: active). If MOCK_STOP_HANG
-# is set, "stop" hangs until it is killed. "show" reports MainPID from
-# $MOCK_MAIN_PID (default 0) and TimeoutStartUSec from $MOCK_TIMEOUT_START.
+# Fake systemctl. Records every call in $MOCK_DIR/systemctl.calls. If
+# MOCK_STOP_HANG is set, "stop" hangs until "kill" has been called.
 : "${MOCK_DIR:?MOCK_DIR must be set}"
 echo "$*" >>"$MOCK_DIR/systemctl.calls"
 case $1 in
-    is-active) cat "$MOCK_DIR/unit-state" 2>/dev/null || echo active ;;
-    show)
-        case $2 in
-            --property=MainPID) echo "MainPID=${MOCK_MAIN_PID:-0}" ;;
-            --property=TimeoutStartUSec) echo "TimeoutStartUSec=${MOCK_TIMEOUT_START:-15min}" ;;
-            *) ;;
-        esac
-        ;;
     stop)
-        if [[ -n ${MOCK_STOP_HANG:-} ]]; then
+        if [[ -n ${MOCK_STOP_HANG:-} && ! -f $MOCK_DIR/killed ]]; then
             exec sleep 600
         fi
-        echo inactive >"$MOCK_DIR/unit-state"
         ;;
-    kill) echo failed >"$MOCK_DIR/unit-state" ;;
-    start) echo activating >"$MOCK_DIR/unit-state" ;;
+    kill) touch "$MOCK_DIR/killed" ;;
     *) ;;
 esac
 exit 0
