@@ -1,0 +1,46 @@
+# /etc/default/pxc-watchdog - overrides for pxc-watchdog.sh
+#
+# Loaded by pxc-watchdog.service (EnvironmentFile=). Each line is KEY=VALUE.
+# No shell syntax: no $VAR expansion, no command substitution, no "export".
+# Quote values that contain spaces. A setting that is commented out or empty
+# keeps the default from the top of the script (shown below).
+#
+# After editing, no reload is needed; the next timer run picks it up.
+# A manual run does not read this file. Pass settings on the command line:
+#   sudo DRY_RUN=1 WAIT_SECONDS=20 /usr/local/sbin/pxc-watchdog.sh
+
+# Site 1 node addresses, space separated. Required: the default is a placeholder.
+DONOR_IPS="10.0.1.11 10.0.1.12"
+
+# 1 = log what would be done, change nothing. Use it for the first few days,
+# then set it back to 0 (or remove the line) once the logs look right.
+#DRY_RUN=0
+
+# systemd unit that runs mysqld ("mysql" on most installs, "mysqld" on some).
+#SERVICE_NAME=mysql
+
+# Port probed on the site 1 nodes before a restart (Galera gcomm).
+#GCOMM_PORT=4567
+
+# Seconds between the two ss samples. The node counts as stuck only if no
+# bytes arrive on 4444/4568 during this time.
+#WAIT_SECONDS=180
+
+# At most this many restarts in any rolling 24 hours. After that the script
+# logs at crit and exits 2 until older restarts fall out of the window.
+#MAX_RESTARTS=4
+
+# Seconds "systemctl stop" may take before mysqld is SIGKILLed. Killing during
+# IST usually turns the next join into a full SST, so keep this generous.
+#STOP_TIMEOUT=300
+
+# If you raise WAIT_SECONDS or STOP_TIMEOUT, keep TimeoutStartSec in
+# pxc-watchdog.service above WAIT_SECONDS + STOP_TIMEOUT + ~2 min
+# (systemctl edit pxc-watchdog.service).
+
+# MySQL client options file with [client] user/password/socket (chmod 600).
+#MYSQL_DEFAULTS_FILE=/etc/pxc-watchdog/my.cnf
+
+# Restart history (must survive reboots) and the flock lock file.
+#STATE_DIR=/var/lib/pxc-watchdog
+#LOCK_FILE=/run/lock/pxc-watchdog.lock

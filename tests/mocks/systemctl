@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake systemctl. Records every call in $MOCK_DIR/systemctl.calls. If
+# MOCK_STOP_HANG is set, "stop" hangs until "kill" has been called. If
+# MOCK_STOP_FAIL is set, "stop" and "kill" fail at once (unit not loaded).
+: "${MOCK_DIR:?MOCK_DIR must be set}"
+echo "$*" >>"$MOCK_DIR/systemctl.calls"
+if [[ -n ${MOCK_STOP_FAIL:-} && ( $1 == stop || $1 == kill ) ]]; then
+    echo "Failed to $1 $2.service: Unit $2.service not loaded." >&2
+    exit 5
+fi
+case $1 in
+    stop)
+        if [[ -n ${MOCK_STOP_HANG:-} && ! -f $MOCK_DIR/killed ]]; then
+            exec sleep 600
+        fi
+        ;;
+    kill) touch "$MOCK_DIR/killed" ;;
+    *) ;;
+esac
+exit 0

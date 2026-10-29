@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake logger. Appends "<priority> <message>" to $MOCK_DIR/log.
+: "${MOCK_DIR:?MOCK_DIR must be set}"
+prio=notice
+while (( $# )); do
+    case $1 in
+        -p) prio=${2#*.}; shift 2 ;;
+        -t) shift 2 ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+echo "$prio $*" >>"$MOCK_DIR/log"
