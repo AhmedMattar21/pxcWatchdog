@@ -1,0 +1,11 @@
+[Unit]
+Description=Run pxc-watchdog every 15 minutes
+
+[Timer]
+OnBootSec=15min
+# Measured from the end of the previous run, so runs never pile up.
+OnUnitInactiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake pgrep. "-f PATTERN" prints the PIDs listed in $MOCK_DIR/sst-pids;
+# "-P PID" finds no children.
+: "${MOCK_DIR:?MOCK_DIR must be set}"
+if [[ $1 == -f && -s $MOCK_DIR/sst-pids ]]; then
+    cat "$MOCK_DIR/sst-pids"
+    exit 0
+fi
+exit 1

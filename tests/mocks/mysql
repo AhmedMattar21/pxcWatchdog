@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake mysql client. Each call prints the next line of $MOCK_DIR/states as
+# wsrep_local_state_comment (the last line repeats). "DOWN" fails like a
+# refused connection.
+: "${MOCK_DIR:?MOCK_DIR must be set}"
+n=$(( $(cat "$MOCK_DIR/mysql.calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" >"$MOCK_DIR/mysql.calls"
+echo "$*" >>"$MOCK_DIR/mysql.args"
+state=$(sed -n "${n}p" "$MOCK_DIR/states")
+[[ -n $state ]] || state=$(tail -n 1 "$MOCK_DIR/states")
+if [[ $state == DOWN ]]; then
+    echo "ERROR 2002 (HY000): Can't connect to local MySQL server through socket" >&2
+    exit 1
+fi
+printf 'wsrep_local_state_comment\t%s\n' "$state"
